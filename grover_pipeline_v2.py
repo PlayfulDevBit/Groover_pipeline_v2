@@ -8,7 +8,7 @@ Extends v1 with configurable error mitigation techniques:
 
 Toggle techniques at run start. Runs baseline + each enabled technique
 individually + combined mode. Produces per-technique artifacts and a
-rich HTML comparison report.
+rich Markdown comparison report.
 
 Local:
     python grover_pipeline_v2.py
@@ -1423,8 +1423,8 @@ def publish_scaling_table(scaling_results: dict) -> None:
     )
 
 
-@task(name="7.8 · HTML Experiment Report", tags=["stage:7", "reporting"])
-def publish_html_report(
+@task(name="7.8 · Markdown Experiment Report", tags=["stage:7", "reporting"])
+def publish_markdown_report(
     problem: dict,
     circuit_data: dict,
     transpile_data: dict,
@@ -1437,7 +1437,7 @@ def publish_html_report(
     enable_combined: bool,
     zne_scale_factors: list,
 ) -> None:
-    """Self-contained rich HTML report embedded in a Prefect markdown artifact."""
+    """Clean Markdown experiment report with detailed explanations."""
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     n = problem["num_qubits"]
@@ -1458,93 +1458,108 @@ def publish_html_report(
         active_techs.append("ZNE")
     num_enabled = len(active_techs)
 
-    # ── inline SVG: success probability bar chart ──────────────────────
-    chart_w = 400
-    bar_h_svg = 38
-    gap_svg = 10
-    left_svg = 180
-    top_svg = 30
-    total_h = top_svg + len(all_results) * (bar_h_svg + gap_svg) + 30
+    # ── Configuration badges ────────────────────────────────────────
+    config_lines = ""
+    config_lines += f"| Dynamical Decoupling (DD) | {'✅ Enabled' if enable_dd else '❌ Disabled'} |\n"
+    config_lines += f"| Readout Error Mitigation (REM) | {'✅ Enabled' if enable_rem else '❌ Disabled'} |\n"
+    config_lines += f"| Zero Noise Extrapolation (ZNE) | {'✅ Enabled' if enable_zne else '❌ Disabled'} |\n"
+    run_combined_flag = enable_combined and num_enabled >= 2
+    config_lines += f"| Combined ({'+'.join(active_techs) if active_techs else 'N/A'}) | {'✅ Enabled' if run_combined_flag else '❌ Disabled'} |"
+    if enable_zne:
+        config_lines += f"\n| ZNE Scale Factors | {zne_scale_factors} |"
 
-    bars_inline = ""
-    for i, r in enumerate(all_results):
-        y = top_svg + i * (bar_h_svg + gap_svg)
-        bw = max(2, r["success_prob"] * chart_w)
-        color = r.get("color", "#888")
-        bars_inline += (
-            f'<text x="{left_svg-8}" y="{y+bar_h_svg/2+5}" text-anchor="end" '
-            f'font-family="monospace" font-size="12" fill="#333">{r["label"]}</text>'
-            f'<rect x="{left_svg}" y="{y}" width="{bw}" height="{bar_h_svg}" '
-            f'fill="{color}" rx="3" opacity="0.85"/>'
-            f'<text x="{left_svg+bw+6}" y="{y+bar_h_svg/2+5}" font-family="monospace" '
-            f'font-size="12" font-weight="bold" fill="{color}">{r["success_prob"]:.4f}</text>'
-        )
-
-    inline_svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{left_svg+chart_w+120}" '
-        f'height="{total_h}" style="display:block;margin:0 auto">'
-        f'{bars_inline}</svg>'
-    )
-
-    # ── results table rows ─────────────────────────────────────────────
+    # ── Results table rows ──────────────────────────────────────────
     result_rows = ""
     for r in all_results:
         delta = (r["success_prob"] - baseline["success_prob"]) / max(baseline["success_prob"], 0.001) * 100
         sign = "+" if delta >= 0 else ""
-        is_best_row = (r["technique"] == best["technique"])
-        row_class = ' class="best-row"' if is_best_row else ""
         found_icon = "✅" if r.get("found_correct") else "❌"
+        best_marker = " **← BEST**" if r["technique"] == best["technique"] and len(all_results) > 1 else ""
         result_rows += (
-            f'<tr{row_class}>'
-            f'<td><span class="pill" style="background:{r.get("color","#888")}">{r["label"]}</span></td>'
-            f'<td style="font-weight:bold">{r["success_prob"]:.4f}</td>'
-            f'<td style="color:{"#2e7d32" if delta>=0 else "#c62828"}">{sign}{delta:.1f}%</td>'
-            f'<td>{found_icon}</td>'
-            f'<td>{r["shots"]:,}</td>'
-            f'<td>{r["description"]}</td>'
-            f'</tr>'
+            f"| {r['label']}{best_marker} | {r['success_prob']:.4f} | "
+            f"{sign}{delta:.1f}% | {found_icon} | {r['shots']:,} |\n"
         )
 
-    # ── ZNE details table ──────────────────────────────────────────────
+    # ── ZNE details ─────────────────────────────────────────────────
     zne_section = ""
     zne_r = next((r for r in all_results if r["technique"] == "ZNE"), None)
     if zne_r and "scale_factors" in zne_r:
         zne_rows = ""
         for scale, p in zip(zne_r["scale_factors"], zne_r["success_probs_at_scales"]):
-            zne_rows += f"<tr><td>λ = {scale}</td><td>{p:.4f}</td><td>measured</td></tr>"
-        zne_rows += (
-            f'<tr style="background:#fff3e0;font-weight:bold">'
-            f'<td>λ = 0 (extrapolated)</td><td>{zne_r["success_prob"]:.4f}</td>'
-            f'<td>{zne_r["extrapolation_type"]}</td></tr>'
-        )
-        zne_section = (
-            f'<div class="card"><h2>ZNE Details — Gate Folding & Extrapolation</h2>'
-            f'<p>Gate folding amplifies noise by replacing each gate U with U·U&#8224;·U (scale 3), '
-            f'U·U&#8224;·U·U&#8224;·U (scale 5), etc. Success probability is measured at each noise level '
-            f'then extrapolated to zero noise via {zne_r["extrapolation_type"]} fit.</p>'
-            f'<table><thead><tr><th>Noise Scale</th><th>P(target)</th><th>Method</th></tr></thead>'
-            f'<tbody>{zne_rows}</tbody></table></div>'
-        )
+            zne_rows += f"| λ = {scale} | {p:.4f} | Measured on QPU |\n"
+        zne_rows += f"| **λ = 0 (extrapolated)** | **{zne_r['success_prob']:.4f}** | **{zne_r['extrapolation_type']} fit** |"
 
-    # ── REM details ────────────────────────────────────────────────────
+        zne_section = f"""
+---
+
+## ZNE Details — Gate Folding & Extrapolation
+
+**How ZNE works:** Zero Noise Extrapolation deliberately makes the circuit *noisier* by
+repeating each gate operation (gate folding: U → U·U†·U for scale 3, U·U†·U·U†·U for scale 5, etc.).
+The idea is: if we measure how fast the success probability drops as we add more noise,
+we can mathematically project backwards to estimate what the result would have been with *zero* noise.
+
+**How to read this table:** Each row shows P(target) — the probability that the QPU
+returned the correct secret key. At λ=1 the circuit runs normally. At λ=3 and λ=5,
+extra noise is injected. The extrapolated λ=0 row is the ZNE estimate of the ideal,
+noise-free success probability.
+
+**Why P(target) may drop to 0.0000 at higher scales:** When noise is amplified too much
+(e.g. λ=3 or λ=5 on a deep circuit), the QPU output becomes essentially random — every
+bitstring is equally likely. With {2**n} possible outcomes, random guessing gives
+P = 1/{2**n} = {1/(2**n):.4f}, which rounds to 0.0000. This is expected behavior and is
+actually useful: it tells ZNE that noise completely destroys the signal, helping the
+extrapolation estimate how much signal was present before noise.
+
+| Noise Scale (λ) | P(target) | Method |
+|-----------------|-----------|--------|
+{zne_rows}
+
+> **Interpretation:** The extrapolated value of **{zne_r['success_prob']:.4f}** is ZNE's best
+> estimate of what P(target) would be on a perfect, noiseless quantum computer. When this
+> value is higher than the baseline, ZNE has successfully recovered some of the signal lost to noise.
+> When measured values at λ=1 are already very low (circuit too deep for the hardware), the
+> extrapolation becomes less reliable — it's working from a very weak signal.
+"""
+
+    # ── REM details ─────────────────────────────────────────────────
     rem_section = ""
     rem_r = next((r for r in all_results if r["technique"] == "REM"), None)
     if rem_r and "qubit_readout_errors" in rem_r:
-        rem_rows = "".join(
-            f"<tr><td>Q{q}</td><td>{e:.4f}</td>"
-            f'<td style="color:{"#2e7d32" if e<0.02 else "#e65100" if e<0.05 else "#c62828"}">'
-            f'{"Low" if e<0.02 else "Medium" if e<0.05 else "High"}</td></tr>'
-            for q, e in enumerate(rem_r["qubit_readout_errors"])
-        )
-        rem_section = (
-            f'<div class="card"><h2>REM Details — Per-Qubit Readout Errors</h2>'
-            f'<p>Calibration circuits prepare |0⟩ and |1⟩ states to measure per-qubit readout error rates. '
-            f'The inverse of the assignment matrix is applied to correct the Grover measurement distribution.</p>'
-            f'<table><thead><tr><th>Qubit</th><th>Error Rate</th><th>Level</th></tr></thead>'
-            f'<tbody>{rem_rows}</tbody></table></div>'
-        )
+        rem_rows = ""
+        for q, e in enumerate(rem_r["qubit_readout_errors"]):
+            level = "🟢 Low" if e < 0.02 else "🟡 Medium" if e < 0.05 else "🔴 High"
+            rem_rows += f"| Q{q} | {e:.4f} | {level} |\n"
 
-    # ── scaling table ──────────────────────────────────────────────────
+        rem_section = f"""
+---
+
+## REM Details — Per-Qubit Readout Errors
+
+**How REM works:** Before running the actual Grover circuit, we run two calibration circuits:
+one that prepares all qubits in |0⟩ and one that prepares all qubits in |1⟩. We then measure
+both circuits many times. In a perfect QPU, preparing |0⟩ and measuring would always give 0 —
+but real hardware sometimes reads 0 as 1, or 1 as 0. These are called **readout errors**.
+
+By comparing what we prepared vs what we measured, we build a per-qubit error profile
+(the "assignment matrix"). We then mathematically invert this matrix and apply it to our
+Grover measurement results, effectively undoing the readout mistakes.
+
+**How to read this table:** The "Error Rate" is the average probability that a qubit's
+measurement is flipped (averaged over 0→1 and 1→0 flips). Lower is better.
+On IQM Garnet, typical readout errors are 1-5%.
+
+| Qubit | Error Rate | Level |
+|-------|-----------|-------|
+{rem_rows}
+
+> **What this means for your results:** REM corrects the *measurement* step only — it fixes
+> the "camera" but not the "scene". If the circuit itself accumulated gate errors, REM won't
+> fix those. That's why REM works well combined with DD (which fixes gate-level idle noise)
+> and ZNE (which extrapolates away gate noise).
+"""
+
+    # ── Scaling section ─────────────────────────────────────────────
     scaling_section = ""
     if scaling_results:
         techniques_sc = list(scaling_results.keys())
@@ -1554,217 +1569,167 @@ def publish_html_report(
             for t, results in scaling_results.items()
             for r in results
         }
-        sc_header = (
-            "<tr><th>Qubits</th><th>Search Space</th><th>Speedup</th>"
-            + "".join(f"<th>{t}</th>" for t in techniques_sc)
-            + "</tr>"
-        )
+
+        sc_header = "| Qubits | Search Space | Speedup |"
+        sc_sep = "|--------|-------------|---------|"
+        for t in techniques_sc:
+            sc_header += f" {t} |"
+            sc_sep += "--------|"
+
         sc_rows = ""
         for nq in sizes_sc:
             r_b = idx_sc.get(("Baseline", nq), {})
-            sc_rows += (
-                f"<tr><td>{nq}</td><td>{2**nq}</td><td>{r_b.get('speedup','—')}×</td>"
-                + "".join(
-                    f"<td>{idx_sc.get((t, nq), {}).get('success_prob', '—'):.4f}</td>"
-                    if isinstance(idx_sc.get((t, nq), {}).get("success_prob"), float)
-                    else f"<td>—</td>"
-                    for t in techniques_sc
-                )
-                + "</tr>"
-            )
-        scaling_section = (
-            f'<div class="card"><h2>Scaling Analysis</h2>'
-            f'<p>Grover circuit executed at multiple qubit counts to show how mitigation benefit '
-            f'varies with problem size and circuit depth.</p>'
-            f'<table><thead>{sc_header}</thead><tbody>{sc_rows}</tbody></table></div>'
-        )
+            row = f"| {nq} | {2**nq} | {r_b.get('speedup','—')}× |"
+            for t in techniques_sc:
+                r = idx_sc.get((t, nq), {})
+                p = r.get("success_prob", "—")
+                row += f" {p:.4f} |" if isinstance(p, float) else f" — |"
+            sc_rows += row + "\n"
 
-    # ── config badges ──────────────────────────────────────────────────
-    def badge(name, enabled):
-        cls = "badge-on" if enabled else "badge-off"
-        icon = "✅" if enabled else "❌"
-        return f'<span class="{cls}">{icon} {name}</span>'
+        scaling_section = f"""
+---
 
-    config_badges = (
-        badge("Dynamical Decoupling (DD)", enable_dd)
-        + badge("Readout Error Mitigation (REM)", enable_rem)
-        + badge("Zero Noise Extrapolation (ZNE)", enable_zne)
-        + badge(f"Combined ({'+'.join(active_techs) if active_techs else 'N/A'})", enable_combined and num_enabled >= 2)
-        + (f'<br><small style="color:#666;margin-top:6px;display:block">ZNE scale factors: {zne_scale_factors}</small>'
-           if enable_zne else "")
-    )
+## Scaling Analysis
 
-    # ── full HTML ──────────────────────────────────────────────────────
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<style>
-  body{{font-family:Arial,sans-serif;max-width:960px;margin:0 auto;padding:24px;background:#f5f5f5;color:#222}}
-  h1{{color:#333;border-bottom:3px solid #5C6BC0;padding-bottom:10px;margin-bottom:6px}}
-  h2{{color:#444;margin-top:0;font-size:1.15em}}
-  .subtitle{{color:#777;font-size:0.9em;margin-bottom:24px}}
-  .card{{background:#fff;border-radius:8px;padding:22px 26px;margin:16px 0;box-shadow:0 2px 6px rgba(0,0,0,0.08)}}
-  .metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:8px 0}}
-  .metric{{text-align:center;padding:14px 8px;border-radius:6px;background:#f9f9f9}}
-  .metric .val{{font-size:1.9em;font-weight:bold;line-height:1.1}}
-  .metric .lbl{{font-size:0.8em;color:#777;margin-top:4px}}
-  table{{width:100%;border-collapse:collapse;font-size:0.92em}}
-  th,td{{padding:9px 12px;text-align:left;border-bottom:1px solid #eee}}
-  th{{background:#f4f4f4;font-weight:600}}
-  tr:hover{{background:#fafafa}}
-  .best-row{{background:#fff8e1}}
-  .pill{{display:inline-block;padding:3px 10px;border-radius:12px;color:#fff;font-size:0.82em}}
-  .badge-on{{display:inline-block;padding:4px 12px;border-radius:14px;background:#e8f5e9;color:#2e7d32;margin:3px;font-size:0.9em}}
-  .badge-off{{display:inline-block;padding:4px 12px;border-radius:14px;background:#f5f5f5;color:#9e9e9e;margin:3px;font-size:0.9em}}
-  .desc-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:6px}}
-  .desc-card{{border-left:4px solid;padding:10px 14px;border-radius:0 6px 6px 0;background:#fafafa;font-size:0.9em}}
-  footer{{text-align:center;color:#aaa;font-size:0.8em;margin-top:32px;padding-top:12px;border-top:1px solid #eee}}
-</style>
-</head>
-<body>
-<h1>Grover's Search v2 — Error Mitigation Report</h1>
-<div class="subtitle">{now} &nbsp;·&nbsp; IQM Garnet (20-qubit superconducting QPU) &nbsp;·&nbsp; {n} search qubits &nbsp;·&nbsp; Secret key |{secret}⟩</div>
+How does each technique perform as the problem gets harder (more qubits = larger search space = deeper circuit = more noise)?
 
-<div class="card">
-  <h2>Experiment Summary</h2>
-  <div class="metrics">
-    <div class="metric" style="border-top:3px solid #5C6BC0">
-      <div class="val" style="color:#5C6BC0">|{secret}⟩</div>
-      <div class="lbl">Hidden Secret Key</div>
-    </div>
-    <div class="metric" style="border-top:3px solid #8B8B8B">
-      <div class="val" style="color:#8B8B8B">{baseline["success_prob"]:.4f}</div>
-      <div class="lbl">Baseline P(target)</div>
-    </div>
-    <div class="metric" style="border-top:3px solid {best["color"]}">
-      <div class="val" style="color:{best["color"]}">{best["success_prob"]:.4f}</div>
-      <div class="lbl">Best P(target)<br><small>{best["label"]}</small></div>
-    </div>
-    <div class="metric" style="border-top:3px solid {"#2e7d32" if improvement>=0 else "#c62828"}">
-      <div class="val" style="color:{"#2e7d32" if improvement>=0 else "#c62828"}">{"+" if improvement>=0 else ""}{improvement:.1f}%</div>
-      <div class="lbl">Best Improvement<br>over Baseline</div>
-    </div>
-  </div>
-  <div class="metrics" style="grid-template-columns:repeat(4,1fr);margin-top:10px">
-    <div class="metric">
-      <div class="val">{2**n}</div><div class="lbl">Search Space Size</div>
-    </div>
-    <div class="metric">
-      <div class="val">{problem["grover_iterations"]}</div><div class="lbl">Grover Iterations</div>
-    </div>
-    <div class="metric">
-      <div class="val">{problem["theoretical_success_prob"]:.3f}</div><div class="lbl">Theoretical P(success)</div>
-    </div>
-    <div class="metric">
-      <div class="val">{problem["speedup"]}×</div><div class="lbl">Quantum Speedup (vs worst)</div>
-    </div>
-  </div>
-</div>
+{sc_header}
+{sc_sep}
+{sc_rows}
+> As qubit count increases, the circuit becomes deeper and accumulates more noise.
+> Mitigation techniques that work well at 3 qubits may show different behavior at 5 qubits.
+> REM tends to be the most consistent since readout errors are independent of circuit depth.
+"""
 
-<div class="card">
-  <h2>Active Configuration</h2>
-  {config_badges}
-  <div style="margin-top:12px;font-size:0.9em;color:#555">
-    <strong>Circuit:</strong>
-    {circuit_data["gate_count"]} original gates · {transpile_data["transpiled_gates"]} transpiled gates ·
-    depth {transpile_data["transpiled_depth"]} · {problem["grover_iterations"]} Grover iteration(s)
-  </div>
-</div>
+    # ── Full Markdown report ────────────────────────────────────────
+    md = f"""# Grover's Search v2 — Error Mitigation Experiment Report
 
-<div class="card">
-  <h2>Results by Technique</h2>
-  {inline_svg}
-  <br/>
-  <table>
-    <thead><tr>
-      <th>Technique</th><th>P(target)</th><th>vs Baseline</th>
-      <th>Found?</th><th>Shots</th><th>Description</th>
-    </tr></thead>
-    <tbody>{result_rows}</tbody>
-  </table>
-</div>
+**Date:** {now} | **Backend:** IQM Garnet (20-qubit superconducting QPU) | **Search qubits:** {n}
 
+---
+
+## Experiment Summary
+
+**What we did:** We hid a random secret key (|{secret}⟩) in a search space of **{2**n} items**
+({n} qubits). Grover's quantum search algorithm was used to find this key on real quantum
+hardware (IQM Garnet). We then applied various error mitigation techniques to see how much
+they improve the result compared to running the raw (unmitigated) circuit.
+
+**How to read the key metrics below:**
+
+| Metric | Value | What It Means |
+|--------|-------|---------------|
+| Hidden Secret Key | |{secret}⟩ | The {n}-bit string we're searching for. This was randomly chosen at the start. The quantum computer doesn't know it — it has to find it using Grover's algorithm. |
+| Baseline P(target) | {baseline['success_prob']:.4f} | The probability of measuring the correct answer with **no error mitigation** — just the raw noisy QPU. On a perfect quantum computer this would be ~{problem['theoretical_success_prob']:.3f}. The gap between {baseline['success_prob']:.4f} and {problem['theoretical_success_prob']:.3f} is caused by hardware noise (gate errors, decoherence, readout errors). |
+| Best P(target) | {best['success_prob']:.4f} ({best['label']}) | The highest success probability achieved after applying error mitigation. Higher = better. |
+| Best Improvement | {"+" if improvement >= 0 else ""}{improvement:.1f}% | How much the best technique improved over the raw baseline. A positive number means mitigation helped. |
+| Search Space Size | {2**n} | Total number of possible answers (2^{n}). A classical computer would need to check up to all {2**n}. |
+| Grover Iterations | {problem['grover_iterations']} | How many times the oracle+diffuser cycle runs. Optimal count = ⌊π/4 · √N⌋ = {problem['grover_iterations']}. |
+| Theoretical P(success) | {problem['theoretical_success_prob']:.3f} | The success probability on a *perfect* quantum computer. This is the ceiling we're trying to approach. |
+| Quantum Speedup | {problem['speedup']}× | Grover needs only {problem['grover_iterations']} queries vs {2**n} (worst case classical). That's a {problem['speedup']}× speedup. |
+
+---
+
+## Active Configuration
+
+| Technique | Status |
+|-----------|--------|
+{config_lines}
+
+**Circuit details:** {circuit_data['gate_count']} original gates → {transpile_data['transpiled_gates']} transpiled gates (depth {transpile_data['transpiled_depth']}) after optimization for IQM Garnet's native gate set (r, cz, id).
+
+---
+
+## Results by Technique
+
+| Technique | P(target) | vs Baseline | Found Correct? | Total Shots |
+|-----------|-----------|-------------|----------------|-------------|
+{result_rows}
+
+> **P(target)** = probability of measuring the secret key |{secret}⟩ when we run the circuit.
+> Higher is better. "Found Correct?" = ✅ if the most frequently measured bitstring *was* the secret key.
+> "vs Baseline" shows the percentage improvement that each mitigation technique provides
+> over the raw, unmitigated circuit.
 {zne_section}
 {rem_section}
 
-<div class="card">
-  <h2>Quantum vs Classical</h2>
-  <table>
-    <thead><tr><th>Method</th><th>Queries</th><th>Notes</th></tr></thead>
-    <tbody>
-      <tr><td>Classical (worst case)</td><td>{comparison["classical_worst"]}</td><td>Check every item</td></tr>
-      <tr><td>Classical (average)</td><td>{comparison["classical_average"]:.0f}</td><td>Expected for random search</td></tr>
-      <tr style="background:#e8f5e9;font-weight:bold">
-        <td>Quantum (Grover)</td><td>{comparison["quantum_queries"]}</td>
-        <td>{comparison["speedup_worst"]:.0f}× faster than worst · {comparison["speedup_average"]:.0f}× faster than average</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
+---
 
+## Quantum vs Classical Comparison
+
+| Method | Queries Needed | Notes |
+|--------|---------------|-------|
+| Classical (worst case) | {comparison['classical_worst']} | Must check every item in the search space |
+| Classical (average) | {comparison['classical_average']:.0f} | Expected queries for random search |
+| **Quantum (Grover)** | **{comparison['quantum_queries']}** | **{comparison['speedup_worst']:.0f}× faster** than worst case, **{comparison['speedup_average']:.0f}× faster** than average |
+
+> Grover's algorithm achieves a *quadratic* speedup: instead of checking N items one by one,
+> it finds the answer in ~√N steps. For {2**n} items, that's {comparison['quantum_queries']} quantum queries
+> instead of {comparison['classical_worst']} classical checks.
 {scaling_section}
 
-<div class="card">
-  <h2>Error Mitigation Technique Guide</h2>
-  <div class="desc-grid">
-    <div class="desc-card" style="border-color:#2196F3">
-      <strong style="color:#2196F3">Dynamical Decoupling (DD)</strong><br/>
-      Inserts X·X pulse sequences on idle qubits during the barrier between oracle and diffuser.
-      Counteracts environmental decoherence. Most effective when the circuit has long idle periods.
-    </div>
-    <div class="desc-card" style="border-color:#4CAF50">
-      <strong style="color:#4CAF50">Readout Error Mitigation (REM)</strong><br/>
-      Calibrates with |0⟩<sup>n</sup> and |1⟩<sup>n</sup> circuits to measure per-qubit readout error rates.
-      Applies the pseudo-inverse correction matrix to the Grover measurement distribution.
-      Addresses the dominant error source on NISQ hardware.
-    </div>
-    <div class="desc-card" style="border-color:#FF9800">
-      <strong style="color:#FF9800">Zero Noise Extrapolation (ZNE)</strong><br/>
-      Gate folding amplifies noise by replacing U with U·U&#8224;·U (scale 3), etc.
-      Grover success probability is measured at scales {zne_scale_factors}.
-      Richardson extrapolation recovers the zero-noise estimate.
-    </div>
-    <div class="desc-card" style="border-color:#E91E63">
-      <strong style="color:#E91E63">Combined (DD + REM + ZNE)</strong><br/>
-      All enabled techniques applied together: DD at circuit level → execution at each ZNE scale →
-      REM post-measurement correction at each scale → extrapolation to zero noise.
-      Combines complementary error suppression strategies.
-    </div>
-  </div>
-</div>
+---
 
-<div class="card">
-  <h2>Cryptographic Context</h2>
-  <p>Grover's algorithm provides a <strong>quadratic speedup</strong> for unstructured search,
-  reducing symmetric-key security from n bits to n/2 effective bits.</p>
-  <table>
-    <thead><tr><th>Key Length</th><th>Classical Cost</th><th>Quantum Cost (Grover)</th><th>Effective Security</th></tr></thead>
-    <tbody>
-      <tr><td>AES-128</td><td>2<sup>128</sup></td><td>2<sup>64</sup></td><td style="color:#e65100">64-bit — vulnerable</td></tr>
-      <tr><td>AES-256</td><td>2<sup>256</sup></td><td>2<sup>128</sup></td><td style="color:#2e7d32">128-bit — still secure</td></tr>
-    </tbody>
-  </table>
-  <p style="font-size:0.9em;color:#555;margin-top:8px">
-    <strong>Current limitation:</strong> This {n}-qubit demo searches {2**n} items.
-    Breaking AES-128 would require ~128 logical qubits running 2<sup>64</sup> Grover iterations —
-    far beyond current NISQ capabilities. Error mitigation extends the reach of today's hardware
-    but does not change this fundamental scale gap.
-  </p>
-</div>
+## Error Mitigation Technique Guide
 
-<footer>
-  Pipeline orchestrated by Prefect &nbsp;·&nbsp;
-  Grover's Search v2 with DD / REM / ZNE on IQM Garnet &nbsp;·&nbsp;
-  {now}
-</footer>
-</body>
-</html>"""
+### Dynamical Decoupling (DD)
+**What it does:** Inserts pairs of X pulses (X·X = identity) on qubits that are sitting idle
+during the circuit. Even though X·X does nothing mathematically, the rapid pulses "refocus"
+the qubit's state and prevent it from drifting due to environmental noise (decoherence).
+Think of it like periodically nudging a spinning top to keep it balanced.
+
+**When it helps most:** Circuits with long idle periods between operations. The GHZ/Grover
+barrier gaps between oracle and diffuser are ideal targets.
+
+### Readout Error Mitigation (REM)
+**What it does:** Measures how often the QPU misreads each qubit (e.g., a qubit in state |0⟩
+gets read as 1). It does this by running calibration circuits, then mathematically corrects
+the Grover measurement results using the inverse of the error profile.
+
+**When it helps most:** Always helpful — readout errors are typically the single largest
+error source on NISQ hardware (1-5% per qubit on IQM Garnet). REM corrects measurement
+mistakes but cannot fix errors that happened *during* the circuit.
+
+### Zero Noise Extrapolation (ZNE)
+**What it does:** Deliberately amplifies the circuit noise by repeating gates (gate folding),
+measures the success probability at several noise levels, then fits a curve and extrapolates
+backwards to estimate the zero-noise result.
+
+**When it helps most:** When noise scales predictably with gate count. Works best on moderate-depth
+circuits. Very deep circuits may already be fully randomized at λ=1, leaving ZNE little signal to work with.
+
+### Combined (DD + REM + ZNE)
+**What it does:** Applies all enabled techniques together in sequence: DD at circuit level →
+execute at each ZNE scale → REM correction post-measurement → extrapolation to zero noise.
+Combines complementary strategies: DD reduces gate-level noise, REM fixes measurement errors,
+ZNE extrapolates away residual gate noise.
+
+---
+
+## Cryptographic Context
+
+Grover's algorithm provides a **quadratic speedup** for unstructured key search:
+
+| Key Length | Classical Cost | Quantum Cost (Grover) | Effective Security |
+|------------|---------------|----------------------|--------------------|
+| AES-128 | 2^128 | 2^64 | 64-bit — at risk in quantum era |
+| AES-256 | 2^256 | 2^128 | 128-bit — still secure |
+
+**Current limitation:** This {n}-qubit demo searches {2**n} items. Breaking AES-128 would require
+~128 logical qubits running 2^64 Grover iterations — far beyond current NISQ capabilities.
+Error mitigation improves today's hardware fidelity but does not bridge this fundamental scale gap.
+The purpose of this experiment is to benchmark how well current error mitigation techniques
+preserve quantum advantage on near-term hardware.
+
+---
+
+*Pipeline orchestrated by Prefect · Real QPU execution on IQM Garnet (20-qubit superconducting) · Error mitigation with Qiskit 2.x · {now}*
+"""
 
     create_markdown_artifact(
-        key="grover-v2-html-report",
-        markdown=html,
-        description="Rich HTML experiment report: all techniques, results, charts, and cryptographic context",
+        key="grover-v2-experiment-report",
+        markdown=md,
+        description="Comprehensive Markdown experiment report with detailed explanations of all metrics and techniques",
     )
 
 
@@ -1777,7 +1742,7 @@ def publish_html_report(
     description=(
         "Grover's Search v2: run baseline + DD + REM + ZNE + Combined on IQM Garnet. "
         "Toggle techniques at run start. Produces per-technique SVG artifacts and "
-        "a rich HTML comparison report."
+        "a rich Markdown comparison report."
     ),
     log_prints=True,
 )
@@ -1908,7 +1873,7 @@ def grover_pipeline_v2(
         publish_scaling_curves(scaling_results)
         publish_scaling_table(scaling_results)
 
-    publish_html_report(
+    publish_markdown_report(
         problem, circuit_data, transpile_data, all_results, comparison, scaling_results,
         enable_dd, enable_rem, enable_zne, enable_combined, zne_scale_factors,
     )

@@ -60,12 +60,12 @@ if __name__ == "__main__":
             "scaling_sizes": [3, 4, 5],
         },
 
-        # ── Dependencies installed in the runner environment ─────────────
+        # ── Dependencies — MUST match versions from working GHZ pipeline ──
         job_variables={
             "pip_packages": [
-                "qiskit>=2.0",
-                "qiskit-iqm",
-                "iqm-client",
+                "qiskit==2.1.2",
+                "iqm-client[qiskit]==33.0.5",
+                "matplotlib",
                 "numpy>=1.24",
             ],
         },
@@ -86,9 +86,3 @@ if __name__ == "__main__":
     print("  - Prefect Cloud account with PREFECT_API_URL and PREFECT_API_KEY set")
     print("  - Prefect Secret block 'iqm-resonance-token' containing IQM Resonance API key")
     print("  - Code pushed to: https://github.com/PlayfulDevBit/Groover_pipeline_v2.git")
-    print("\nExample runs:")
-    print("  Full run (all techniques):    defaults as-is")
-    print("  Baseline only:                enable_dd=False, enable_rem=False, enable_zne=False")
-    print("  DD + REM only:                enable_zne=False")
-    print("  ZNE with more scales:         zne_scale_factors=[1,3,5,7]")
-    print("  Larger problem:               num_search_qubits=4, scaling_sizes=[4,5,6]")

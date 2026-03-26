@@ -369,9 +369,7 @@ def run_grover_with_dd(problem: dict, transpile_data: dict, shots: int) -> dict:
         raise RuntimeError("IQM token required")
 
     from qiskit import transpile as qk_transpile
-    from qiskit.circuit.library import XGate
-    from qiskit.transpiler import PassManager
-    from qiskit.transpiler.passes import PadDynamicalDecoupling, ALAPScheduleAnalysis
+    from iqm.iqm_client.models import CircuitCompilationOptions, DDMode
 
     backend = get_iqm_backend(token)
     qc = transpile_data["_original"]
@@ -380,20 +378,13 @@ def run_grover_with_dd(problem: dict, transpile_data: dict, shots: int) -> dict:
     secret = problem["secret_key"]
     n = problem["num_qubits"]
 
-    try:
-        dd_sequence = [XGate(), XGate()]
-        pm = PassManager([
-            ALAPScheduleAnalysis(target=backend.target),
-            PadDynamicalDecoupling(target=backend.target, dd_sequence=dd_sequence),
-        ])
-        qc_dd = pm.run(qc_t)
-        logger.info(f"DD: applied XX sequences, {qc_dd.size()} gates (was {qc_t.size()})")
-    except Exception as e:
-        logger.warning(f"DD pass failed ({e}), falling back to base transpiled circuit")
-        qc_dd = qc_t
+    # Use IQM's server-side DD — standard strategy auto-selects XX/YXYX/XYXYYXYX
+    # based on idle durations (no circuit modification needed)
+    dd_options = CircuitCompilationOptions(dd_mode=DDMode.ENABLED)
+    logger.info("DD: using IQM server-side standard DD strategy (XX/YXYX/XYXYYXYX)")
 
     t0 = time.time()
-    job = backend.run(qc_dd, shots=shots, use_timeslot=False)
+    job = backend.run(qc_t, shots=shots, use_timeslot=False, circuit_compilation_options=dd_options)
     counts = job.result().get_counts()
     exec_time = round(time.time() - t0, 2)
 
@@ -588,7 +579,7 @@ def run_grover_combined(
         raise RuntimeError("IQM token required")
 
     from qiskit import transpile as qk_transpile
-    from qiskit.circuit.library import XGate
+    from iqm.iqm_client.models import CircuitCompilationOptions, DDMode
 
     backend = get_iqm_backend(token)
     n = problem["num_qubits"]
@@ -597,19 +588,9 @@ def run_grover_combined(
     qc = transpile_data["_original"]
     qc_t = qk_transpile(qc, backend=backend, optimization_level=2)
 
-    # Step 1: Apply DD
+    # Step 1: DD is handled server-side via CircuitCompilationOptions at run time
     if enable_dd:
-        try:
-            from qiskit.transpiler import PassManager
-            from qiskit.transpiler.passes import PadDynamicalDecoupling, ALAPScheduleAnalysis
-            pm = PassManager([
-                ALAPScheduleAnalysis(target=backend.target),
-                PadDynamicalDecoupling(target=backend.target, dd_sequence=[XGate(), XGate()]),
-            ])
-            qc_t = pm.run(qc_t)
-            logger.info("Combined: DD applied")
-        except Exception as e:
-            logger.warning(f"Combined: DD failed ({e})")
+        logger.info("Combined: DD will be applied server-side via IQM API")
 
     # Step 2: REM calibration
     inv_matrices = None
@@ -619,14 +600,17 @@ def run_grover_combined(
         qubit_matrices, inv_matrices = _calibrate_rem(backend, n, shots)
         logger.info("Combined: REM calibration done")
 
-    # Step 3: ZNE runs
+    # Step 3: ZNE runs (with DD applied server-side if enabled)
     scales = zne_scale_factors if enable_zne else [1]
     probs_at_scales = []
     last_counts = {}
+    run_options = {}
+    if enable_dd:
+        run_options["circuit_compilation_options"] = CircuitCompilationOptions(dd_mode=DDMode.ENABLED)
 
     for scale in scales:
         qc_run = _fold_circuit(qc_t, scale)
-        job = backend.run(qc_run, shots=shots, use_timeslot=False)
+        job = backend.run(qc_run, shots=shots, use_timeslot=False, **run_options)
         counts = job.result().get_counts()
 
         if inv_matrices is not None:
@@ -733,7 +717,7 @@ def run_scaling_with_mitigation(
     """
     logger = get_run_logger()
     from qiskit import transpile as qk_transpile
-    from qiskit.circuit.library import XGate
+    from iqm.iqm_client.models import CircuitCompilationOptions, DDMode
 
     token = get_iqm_token()
     if not token:
@@ -752,6 +736,8 @@ def run_scaling_with_mitigation(
         techniques.append("ZNE")
     if run_combined_flag:
         techniques.append("Combined")
+
+    dd_options = CircuitCompilationOptions(dd_mode=DDMode.ENABLED)
 
     results = {t: [] for t in techniques}
 
@@ -780,28 +766,20 @@ def run_scaling_with_mitigation(
                 "speedup": round((2 ** n) / prob["grover_iterations"], 1),
             })
 
-        # Baseline
+        # Baseline (DD explicitly disabled)
         t0 = time.time()
-        job = backend.run(qc_t, shots=shots, use_timeslot=False)
+        job = backend.run(qc_t, shots=shots, use_timeslot=False,
+                          circuit_compilation_options=CircuitCompilationOptions(dd_mode=DDMode.DISABLED))
         counts = job.result().get_counts()
         p = _grover_success_prob(counts, secret, shots)
         logger.info(f"  Baseline P(target)={p:.4f} ({round(time.time()-t0,1)}s)")
         _record("Baseline", counts, p)
 
-        # DD
+        # DD (server-side via IQM API)
         if enable_dd:
-            try:
-                from qiskit.transpiler import PassManager
-                from qiskit.transpiler.passes import PadDynamicalDecoupling, ALAPScheduleAnalysis
-                pm = PassManager([
-                    ALAPScheduleAnalysis(target=backend.target),
-                    PadDynamicalDecoupling(target=backend.target, dd_sequence=[XGate(), XGate()]),
-                ])
-                qc_dd = pm.run(qc_t)
-            except Exception:
-                qc_dd = qc_t
             t0 = time.time()
-            counts_dd = backend.run(qc_dd, shots=shots, use_timeslot=False).result().get_counts()
+            counts_dd = backend.run(qc_t, shots=shots, use_timeslot=False,
+                                    circuit_compilation_options=dd_options).result().get_counts()
             p_dd = _grover_success_prob(counts_dd, secret, shots)
             logger.info(f"  DD P(target)={p_dd:.4f} ({round(time.time()-t0,1)}s)")
             _record("DD", counts_dd, p_dd)
@@ -831,28 +809,19 @@ def run_scaling_with_mitigation(
             logger.info(f"  ZNE P(target)={p_zne:.4f}")
             _record("ZNE", {}, round(p_zne, 4))
 
-        # Combined
+        # Combined (DD via server-side + REM + ZNE)
         if run_combined_flag:
-            qc_comb = qc_t.copy()
-            if enable_dd:
-                try:
-                    from qiskit.transpiler import PassManager
-                    from qiskit.transpiler.passes import PadDynamicalDecoupling, ALAPScheduleAnalysis
-                    pm = PassManager([
-                        ALAPScheduleAnalysis(target=backend.target),
-                        PadDynamicalDecoupling(target=backend.target, dd_sequence=[XGate(), XGate()]),
-                    ])
-                    qc_comb = pm.run(qc_t)
-                except Exception:
-                    pass
             inv_c = None
             if enable_rem:
                 _, inv_c = _calibrate_rem(backend, n, shots)
             scales_c = zne_scale_factors if enable_zne else [1]
+            run_opts_c = {}
+            if enable_dd:
+                run_opts_c["circuit_compilation_options"] = dd_options
             probs_c = []
             for scale in scales_c:
-                qc_sc = _fold_circuit(qc_comb, scale)
-                c = backend.run(qc_sc, shots=shots, use_timeslot=False).result().get_counts()
+                qc_sc = _fold_circuit(qc_t, scale)
+                c = backend.run(qc_sc, shots=shots, use_timeslot=False, **run_opts_c).result().get_counts()
                 if inv_c:
                     c = _apply_rem_correction(c, inv_c, n, shots)
                 probs_c.append(_grover_success_prob(c, secret, shots))
@@ -1673,10 +1642,13 @@ they improve the result compared to running the raw (unmitigated) circuit.
 ## Error Mitigation Technique Guide
 
 ### Dynamical Decoupling (DD)
-**What it does:** Inserts pairs of X pulses (X·X = identity) on qubits that are sitting idle
-during the circuit. Even though X·X does nothing mathematically, the rapid pulses "refocus"
-the qubit's state and prevent it from drifting due to environmental noise (decoherence).
-Think of it like periodically nudging a spinning top to keep it balanced.
+**What it does:** Tells IQM's server-side compiler to automatically insert DD pulse sequences
+(XX, YXYX, or XYXYYXYX) on qubits that are sitting idle during the circuit. The compiler
+knows the exact gate timings and picks the best sequence for each idle slot — short idles
+get XX (two π-pulses), longer idles get YXYX or XYXYYXYX. These pulses refocus the qubit's
+state and cancel accumulated phase errors (Z and ZZ errors) caused by decoherence and
+residual interactions. The circuit itself is not modified — DD is applied at the hardware
+compilation level via `CircuitCompilationOptions(dd_mode=DDMode.ENABLED)`.
 
 **When it helps most:** Circuits with long idle periods between operations. The GHZ/Grover
 barrier gaps between oracle and diffuser are ideal targets.
